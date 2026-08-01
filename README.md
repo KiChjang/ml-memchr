@@ -17,8 +17,8 @@ Both are `[@@zero_alloc]`-checked. The headline results, at 64 KiB:
 
 | | vs. C SWAR | vs. `Bytes.index_opt` |
 | --- | --- | --- |
-| `memchr` (optimized) | ~1.3× slower | ~7.1× faster |
-| `ml_memchr` (idiomatic) | ~1.43× slower | ~6.4× faster |
+| `memchr` (optimized) | ~1.3x slower | ~7.1x faster |
+| `ml_memchr` (idiomatic) | ~1.43x slower | ~6.4x faster |
 
 And at small inputs (≤ 16 bytes) the optimized version is **faster than the C and
 Rust references**, though for an algorithmic reason, not a language one. See
@@ -98,7 +98,7 @@ Two things make this safe rather than reckless:
 | Feature | Where | Why |
 | --- | --- | --- |
 | `int64#` (`Int64_u`) | the whole kernel | Unboxed 64-bit ints. In stock OCaml, `Int64` arithmetic allocates a boxed value per intermediate; here `lxor`, `-`, `land`, `lognot` are raw machine ops on registers. |
-| `%caml_bytes_get64u#` | `Bytes.unsafe_get_int64_ne` | Unaligned 64-bit load out of `bytes` returning an *unboxed* `int64#` directly — no box on the way out. |
+| `%caml_bytes_get64u#` | `Bytes.unsafe_get_int64_ne` | Unaligned 64-bit load out of `bytes` returning an *unboxed* `int64#` directly, no box on the way out. |
 | `..._indexed_by_int64#` | every load in the loops | Indexes the load by an `int64#` rather than a tagged `int`. The loop counter never has to be tagged/untagged just to be used as an offset. |
 | `let mutable i` / `let mutable hit` | `memchr`'s loop state | OxCaml mutable local bindings. Stock OCaml would need `ref` cells. `ml_memchr` deliberately avoids these, which is most of the difference between the two. |
 | `s @ local read` | both signatures | The haystack is taken at `local` mode (it cannot escape) and `read` (it is not mutated). |
@@ -136,7 +136,7 @@ slower in steady state.
 
 | Name | What it is |
 | --- | --- |
-| `C SIMD memchr` | glibc's `memchr` (`benchmarks/memchr_stubs.c`). Fully vectorized — the ceiling, not a fair SWAR peer. |
+| `C SIMD memchr` | glibc's `memchr` (`benchmarks/memchr_stubs.c`). Fully vectorized; the ceiling, not a fair SWAR peer. |
 | `C SWAR memchr` | The same 32/8/1 algorithm in C, compiled `-O2 -fno-tree-vectorize`. |
 | `Rust SWAR memchr` | The same algorithm in Rust, built `--release` with `-C no-vectorize-loops -C no-vectorize-slp`. Not the `memchr` crate — hand-written SWAR. |
 | `ML style SWAR memchr` | `Memchr.ml_memchr`, the idiomatic recursive version. |
