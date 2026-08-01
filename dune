@@ -1,0 +1,3 @@
+(alias
+  (name default)
+  (deps benchmarks/memchr_bench.exe (alias_rec src/all)))

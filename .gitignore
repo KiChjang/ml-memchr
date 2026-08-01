@@ -1,0 +1,9 @@
+_build/
+*.install
+
+# cargo, if benchmarks/rust is built by hand
+benchmarks/rust/target/
+benchmarks/rust/Cargo.lock
+
+# project-local opam switch
+_opam/

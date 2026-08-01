@@ -1,0 +1,28 @@
+(rule
+  (targets libmemchr_rs.a)
+  (deps (source_tree rust))
+  (action
+    (no-infer
+      (progn
+        (setenv RUSTFLAGS "-C no-vectorize-loops -C no-vectorize-slp"
+          (run cargo build --release --offline
+               --manifest-path rust/Cargo.toml
+               --target-dir cargo-target))
+        (copy cargo-target/release/libmemchr_rs.a libmemchr_rs.a)))))
+
+(executable
+  (name memchr_bench)
+  (libraries memchr core core_bench core_unix.command_unix stdlib_upstream_compatible)
+  (foreign_archives memchr_rs)
+  (foreign_stubs
+    (language c)
+    (names memchr_stubs rs_stubs)
+    (flags
+      (:standard -O2)))
+  (foreign_stubs
+    (language c)
+    (names swar_stubs)
+    (flags
+      (:standard -O2 -fno-tree-vectorize)))
+  (link_flags (-cclib -lpthread -cclib -ldl -cclib -lm))
+  (ocamlopt_flags (:standard -O3)))
