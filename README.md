@@ -103,7 +103,7 @@ Two things make this safe rather than reckless:
 | `let mutable i` / `let mutable hit` | `memchr`'s loop state | OxCaml mutable local bindings. Stock OCaml would need `ref` cells. `ml_memchr` deliberately avoids these, which is most of the difference between the two. |
 | `s @ local read` | both signatures | The haystack is taken at `local` mode (it cannot escape) and `read` (it is not mutated). |
 | `@@ portable` | the `external` declarations | Marks the primitives as safe to use across capsules/domains. |
-| `Ocaml_intrinsics_kernel.Int64.Unboxed.count_trailing_zeros` | the tail | `tzcnt` on an `int64#`, no boxing at the boundary. |
+| `Int64.Unboxed.count_trailing_zeros` | the tail | `tzcnt` on an `int64#`, no boxing at the boundary. |
 | `[@@zero_alloc]` | `src/memchr.mli`, both values | **Compiler-checked.** The build fails if either function ever allocates. This is what turns "I think this is unboxed" into a guarantee. |
 | `[@nontail]` | `ml_memchr`'s entry | Marks the `block #0L` call as not-a-tail-call so the recursion is compiled as a loop rather than growing the stack expectation. |
 
