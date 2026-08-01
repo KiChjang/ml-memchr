@@ -1,6 +1,6 @@
 # ml-memchr
 
-An attempt at writing `memchr` in **OxCaml**, using unboxed 64-bit integers, mode
+An attempt at writing `memchr` in [**OxCaml**](https://oxcaml.org), using unboxed 64-bit integers, mode
 annotations and mutable locals to get a SWAR (SIMD-Within-A-Register) byte search
 that allocates nothing — and then measuring honestly how close it lands to the
 equivalent C and Rust.
