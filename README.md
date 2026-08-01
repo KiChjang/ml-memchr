@@ -58,8 +58,8 @@ hit <-
    else Int64_u.(i + #24L));
 ```
 
-This costs nothing in the common (no-match) path — the chain sits inside the
-already-taken `if` — and saves up to three redundant SWAR probes on the hit path.
+This costs nothing in the common (no-match) path: the chain sits inside the
+already-taken `if` and saves up to three redundant SWAR probes on the hit path.
 The `r0` test has to come first: a needle can occur in word 0 *and* in a later
 word of the same block, and `memchr` must report the earlier one.
 
@@ -191,7 +191,7 @@ Nanoseconds per run:
 | 4096 | 26.44 | 193.01 | 187.16 | 276.37 | **245.57** | 1 641.04 |
 | 65536 | 486.00 | 2 879.18 | 2 734.54 | 4 120.85 | **3 705.12** | 26 469.90 |
 
-A second run of the same binary came out 2–6% higher on *every* row, glibc and
+A second run of the same binary came out 2-6% higher on *every* row, glibc and
 the stdlib baseline included, likely due to whole-machine drift (no frequency pinning)
 and not a per-implementation effect. The ratios between implementations moved by less
 than 5%, so the table above is the cooler of the two runs and the comparisons below
@@ -220,7 +220,7 @@ really is byte-at-a-time.
 ### Reading the results
 
 **The unboxing works.** ~6.7 bytes/cycle is not achievable if `int64#` values are
-being boxed — a single allocation per iteration would show up immediately as a
+being boxed: a single allocation per iteration would show up immediately as a
 collapse toward the stdlib line. The `[@@zero_alloc]` check holds this in place at
 build time.
 
@@ -236,10 +236,10 @@ Rust leave the loop; OCaml computes a new cursor value on every iteration whethe
 or not it found anything.
 
 **Idiomatic costs ~10%.** `ml_memchr` runs at 6.1 B/c against the optimized 6.7
-B/c — the recursive version is *not* catastrophically slower, and it is still 6.4×
-faster than the stdlib. Most of its extra cost is at small sizes (27.9c vs 12.9c
-at `len = 4`), where it pays full tier setup and then walks the tail one byte at a
-time. If you want the readable version, it is not a disaster.
+B/c, meaning the recursive version is *not* catastrophically slower, and it is
+still 6.4× faster than the stdlib. Most of its extra cost is at small sizes (27.9c
+vs 12.9c at `len = 4`), where it pays full tier setup and then walks the tail one
+byte at a time. If you want the readable version, it is not a disaster.
 
 **Nothing beats glibc, and nothing was going to.** At 64 KiB glibc is 7.6× faster
 than the optimized OCaml and 5.9× faster than the C SWAR it is measured against.
