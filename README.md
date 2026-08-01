@@ -2,15 +2,15 @@
 
 An attempt at writing `memchr` in [**OxCaml**](https://oxcaml.org), using unboxed 64-bit integers, mode
 annotations and mutable locals to get a SWAR (SIMD-Within-A-Register) byte search
-that allocates nothing — and then measuring honestly how close it lands to the
+that allocates nothing, and then measuring honestly how close it lands to the
 equivalent C and Rust.
 
 The library ships **two** implementations of the same algorithm, so the cost of
 writing it idiomatically can be separated from the cost of the language:
 
-- **`ml_memchr`** — idiomatic OCaml. Mutually recursive `block`/`word`/`bytes`
+- **`ml_memchr`**: idiomatic OCaml. Mutually recursive `block`/`word`/`bytes`
   functions, no mutable state, tail calls all the way down.
-- **`memchr`** — the optimized version. Mutable locals, hand-rolled loop exits,
+- **`memchr`**: the optimized version. Mutable locals, hand-rolled loop exits,
   and a branchless `ctz`-based tail.
 
 Both are `[@@zero_alloc]`-checked. The headline results, at 64 KiB:
@@ -21,18 +21,18 @@ Both are `[@@zero_alloc]`-checked. The headline results, at 64 KiB:
 | `ml_memchr` (idiomatic) | ~1.43× slower | ~6.4× faster |
 
 And at small inputs (≤ 16 bytes) the optimized version is **faster than the C and
-Rust references** — though for an algorithmic reason, not a language one. See
+Rust references**, though for an algorithmic reason, not a language one. See
 [Reading the results](#reading-the-results).
 
 ## The algorithm
 
 Both implementations are a three-tier scan:
 
-1. **32 bytes/iteration** — four unaligned 64-bit loads, four SWAR probes, OR the
+1. **32 bytes/iteration**: four unaligned 64-bit loads, four SWAR probes, OR the
    results together and test once. On a hit, narrow to *which* of the four words
    matched.
-2. **8 bytes/iteration** — one word at a time.
-3. **The tail** — resolve the exact byte index within the final word.
+2. **8 bytes/iteration**: one word at a time.
+3. **The tail**: resolve the exact byte index within the final word.
 
 The SWAR kernel is the classic zero-byte trick:
 
@@ -87,7 +87,7 @@ Two things make this safe rather than reckless:
 - **The over-read is deliberate and in-bounds.** The load reads a full 8 bytes
   even when fewer remain. `i` is always a multiple of 8 (every loop advances by 8
   or 32 from zero, and every `hit` is a word offset), and OCaml's `bytes` data
-  area is a whole number of words — so an 8-aligned 8-byte read at any `i < n`
+  area is a whole number of words, so an 8-aligned 8-byte read at any `i < n`
   stays inside the allocation. The `valid` mask discards the bytes past `n`.
 - **It is little-endian-specific.** `valid` keeps the *low* `r` bytes and `ctz`
   counts from the low end, both of which assume byte 0 is the least significant.
@@ -126,8 +126,8 @@ Every iteration carries a branch that either advances the cursor *or* slams it t
 structural difference from `benchmarks/swar_stubs.c` and
 `benchmarks/rust/src/lib.rs`.
 
-`ml_memchr` sidesteps this entirely — recursion gives you the early exit for free,
-because `word i` simply *is* the continuation — at the cost of running ~10%
+`ml_memchr` sidesteps this entirely: recursion gives you the early exit for free,
+because `word i` simply *is* the continuation, at the cost of running ~10%
 slower in steady state.
 
 ## Benchmarks
@@ -152,8 +152,8 @@ three languages, with glibc alongside as a reference for what real SIMD buys.
 
 `core_bench`, driven from `benchmarks/memchr_bench.ml`. The haystack is `len`
 bytes of `'a'` with a single `'z'` planted at `len - len/10 - 1`, so every run
-scans roughly 90% of the buffer before hitting — a mostly-miss scan, which is the
-case SWAR is supposed to win. All calls go through `Sys.opaque_identity` so
+scans roughly 90% of the buffer before hitting, making it a mostly-miss scan, which
+is the case SWAR is supposed to win. All calls go through `Sys.opaque_identity` so
 nothing is folded away, and the C/Rust entry points are `[@@noalloc]`.
 
 ### Results
@@ -192,9 +192,9 @@ Nanoseconds per run:
 | 65536 | 486.00 | 2 879.18 | 2 734.54 | 4 120.85 | **3 705.12** | 26 469.90 |
 
 A second run of the same binary came out 2–6% higher on *every* row, glibc and
-the stdlib baseline included — whole-machine drift (no frequency pinning), not a
-per-implementation effect. The ratios between implementations moved by less than
-5%, so the table above is the cooler of the two runs and the comparisons below
+the stdlib baseline included, likely due to whole-machine drift (no frequency pinning)
+and not a per-implementation effect. The ratios between implementations moved by less
+than 5%, so the table above is the cooler of the two runs and the comparisons below
 are averaged across both.
 
 ### Steady-state throughput
@@ -247,7 +247,7 @@ That gap is AVX2 versus 64-bit registers, and it is the reason the interesting
 number is the ~1.3× against C SWAR rather than the 7.6× against glibc.
 
 **Allocation column.** `core_bench` reports a uniform `3.00w` per run for *every*
-row, including the `[@@noalloc]` C stubs — it is harness overhead in the staged
+row, including the `[@@noalloc]` C stubs. This is harness overhead in the staged
 closure, not the implementations. The real allocation claim here is the
 compiler-checked `[@@zero_alloc]`, not this column.
 
@@ -306,4 +306,4 @@ benchmarks/rust/src/lib.rs   Rust SWAR reference (vectorization disabled)
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT; see [LICENSE](LICENSE).
