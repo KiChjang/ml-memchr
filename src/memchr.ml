@@ -43,7 +43,7 @@ let memchr (s @ local read) c n =
   in
   let mutable i = #0L in
   let mutable hit = -#1L in
-  while Int64_u.to_int i + 32 <= n do
+  while Int64_u.(i + #32L <= n64) do
     let r0 = swar_raw (Bytes.unsafe_get_int64_ne_indexed_by_int64 s i) in
     let r1 =
       swar_raw (Bytes.unsafe_get_int64_ne_indexed_by_int64 s Int64_u.(i + #8L))
@@ -65,7 +65,7 @@ let memchr (s @ local read) c n =
     else i <- Int64_u.(i + #32L)
   done;
   if Int64_u.(hit < #0L) then
-    while Int64_u.to_int i + 8 <= n do
+    while Int64_u.(i + #8L <= n64) do
       let r = swar_raw (Bytes.unsafe_get_int64_ne_indexed_by_int64 s i) in
       if not Int64_u.(r land mask = #0L) then (
         hit <- i;
@@ -90,53 +90,53 @@ let memchr (s @ local read) c n =
   Int64_u.to_int hit
 
 let ml_memchr (s @ local read) c n =
-  let ones = Int64_u.of_int (Sys.opaque_identity 0x0101_0101_0101_0101) in
-  let mask = Int64_u.(ones lsl 7) in
-  let cs = Int64_u.mul ones (Int64_u.of_int (Char.code c)) in
-  let[@inline always] swar_raw w =
+  let[@inline always] swar_raw w cs ones =
     let w = Int64_u.(w lxor cs) in
     Int64_u.((w - ones) land lognot w)
   in
-  let rec bytes i =
+  let rec bytes i s cs ones mask c n =
     if Int64_u.to_int i >= n then -1
     else if Bytes.unsafe_get_int8_indexed_by_int64 s i land 0xFF = Char.code c
     then Int64_u.to_int i
-    else bytes Int64_u.(i + #1L)
+    else bytes Int64_u.(i + #1L) s cs ones mask c n
   in
-  let rec word i =
-    if Int64_u.to_int i + 8 > n then bytes i
+  let rec word i s cs ones mask c n =
+    if Int64_u.to_int i + 8 > n then bytes i s cs ones mask c n
     else if
       not
         Int64_u.(
-          swar_raw (Bytes.unsafe_get_int64_ne_indexed_by_int64 s i) land mask
+          swar_raw (Bytes.unsafe_get_int64_ne_indexed_by_int64 s i) cs ones land mask
           = #0L)
-    then bytes i
-    else word Int64_u.(i + #8L)
+    then bytes i s cs ones mask c n
+    else word Int64_u.(i + #8L) s cs ones mask c n
   in
-  let rec block i =
-    if Int64_u.to_int i + 32 > n then word i
+  let rec block i s cs ones mask c n =
+    if Int64_u.to_int i + 32 > n then word i s cs ones mask c n
     else
-      let r0 = swar_raw (Bytes.unsafe_get_int64_ne_indexed_by_int64 s i) in
+      let r0 = swar_raw (Bytes.unsafe_get_int64_ne_indexed_by_int64 s i) cs ones in
       let r1 =
         swar_raw
-          (Bytes.unsafe_get_int64_ne_indexed_by_int64 s Int64_u.(i + #8L))
+          (Bytes.unsafe_get_int64_ne_indexed_by_int64 s Int64_u.(i + #8L)) cs ones
       in
       let r2 =
         swar_raw
-          (Bytes.unsafe_get_int64_ne_indexed_by_int64 s Int64_u.(i + #16L))
+          (Bytes.unsafe_get_int64_ne_indexed_by_int64 s Int64_u.(i + #16L)) cs ones
       in
       let r3 =
         swar_raw
-          (Bytes.unsafe_get_int64_ne_indexed_by_int64 s Int64_u.(i + #24L))
+          (Bytes.unsafe_get_int64_ne_indexed_by_int64 s Int64_u.(i + #24L)) cs ones
       in
       if not Int64_u.(r0 lor r1 lor r2 lor r3 land mask = #0L) then
-        if not Int64_u.(r0 land mask = #0L) then word i
-        else if not Int64_u.(r1 land mask = #0L) then word Int64_u.(i + #8L)
-        else if not Int64_u.(r2 land mask = #0L) then word Int64_u.(i + #16L)
-        else word Int64_u.(i + #24L)
-      else block Int64_u.(i + #32L)
+        if not Int64_u.(r0 land mask = #0L) then word i s cs ones mask c n
+        else if not Int64_u.(r1 land mask = #0L) then word Int64_u.(i + #8L) s cs ones mask c n
+        else if not Int64_u.(r2 land mask = #0L) then word Int64_u.(i + #16L) s cs ones mask c n
+        else word Int64_u.(i + #24L) s cs ones mask c n
+      else block Int64_u.(i + #32L) s cs ones mask c n
   in
-  block #0L [@nontail]
+  let ones = Int64_u.of_int (Sys.opaque_identity 0x0101_0101_0101_0101) in
+  let mask = Int64_u.(ones lsl 7) in
+  let cs = Int64_u.mul ones (Int64_u.of_int (Char.code c)) in
+  block #0L s cs ones mask c n
 
 let () = Random.self_init ()
 

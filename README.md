@@ -10,17 +10,21 @@ writing it idiomatically can be separated from the cost of the language:
 
 - **`ml_memchr`**: idiomatic OCaml. Mutually recursive `block`/`word`/`bytes`
   functions, no mutable state, tail calls all the way down.
-- **`memchr`**: the optimized version. Mutable locals, hand-rolled loop exits,
+- **`memchr`**: the imperative version. Mutable locals, hand-rolled loop exits,
   and a branchless `ctz`-based tail.
 
 Both are `[@@zero_alloc]`-checked. The headline results, at 64 KiB:
 
 | | vs. C SWAR | vs. `Bytes.index_opt` |
 | --- | --- | --- |
-| `memchr` (optimized) | ~1.3x slower | ~7.1x faster |
-| `ml_memchr` (idiomatic) | ~1.43x slower | ~6.4x faster |
+| `memchr` (imperative) | ~1.28x slower | ~7.1x faster |
+| `ml_memchr` (idiomatic) | ~1.29x slower | ~7.1x faster |
 
-And at small inputs (≤ 16 bytes) the optimized version is **faster than the C and
+The idiomatic version used to trail the imperative one by ~10% in steady state.
+It no longer does, and the reason it did turned out to be more interesting than
+the gap itself. See [The `[@nontail]` trap](#the-nontail-trap).
+
+At small inputs (≤ 16 bytes) the imperative version is **faster than the C and
 Rust references**, though for an algorithmic reason, not a language one. See
 [Reading the results](#reading-the-results).
 
@@ -37,7 +41,7 @@ Both implementations are a three-tier scan:
 The SWAR kernel is the classic zero-byte trick:
 
 ```ocaml
-let[@inline always] swar_raw w =
+let[@inline always] swar_raw w cs ones =
   let w = Int64_u.(w lxor cs) in
   Int64_u.((w - ones) land lognot w)
 ```
@@ -65,9 +69,10 @@ word of the same block, and `memchr` must report the earlier one.
 
 ### The `ctz` tail
 
-This is where `memchr` and `ml_memchr` diverge, and it is the single biggest win.
-`ml_memchr` (like the C and Rust references) finishes with a byte-at-a-time loop.
-`memchr` instead does one masked load and one instruction:
+This is where `memchr` and `ml_memchr` diverge, and it is what buys the
+imperative version its small-input win. `ml_memchr` (like the C and Rust
+references) finishes with a byte-at-a-time loop. `memchr` instead does one masked
+load and one instruction:
 
 ```ocaml
 let w = swar_raw (Bytes.unsafe_get_int64_ne_indexed_by_int64 s i) in
@@ -93,6 +98,88 @@ Two things make this safe rather than reckless:
   counts from the low end, both of which assume byte 0 is the least significant.
   This has only been built and tested on x86-64.
 
+## The `[@nontail]` trap
+
+This is the most instructive thing the project turned up, and it is specific to
+having modes in the language.
+
+`ml_memchr` originally defined its helpers as closures over the enclosing scope,
+which is the obvious way to write it. `s`, `c`, `n`, `cs`, `ones` and `mask` are
+fixed for the entire call, so why thread them through every recursive call?
+
+```ocaml
+let ml_memchr (s @ local read) c n =
+  let ones = ... in
+  let mask = ... in
+  let cs = ... in
+  let rec bytes i = ... in
+  let rec word i  = ... in
+  let rec block i = ... in
+  block #0L [@nontail]
+```
+
+The reason to thread them through is that `s` is `local`. A closure that captures
+a local value is itself local, so each helper had to be built as a **region-local
+allocation on every call**. And a local value cannot be the target of a tail
+call, because the region has to be torn down once the call returns. Drop the
+annotation and the compiler says exactly that:
+
+```
+Error: This value is "local"
+       because it is allocated at ... containing data
+       which is "local" to the parent region
+       because it closes over the value "s" ...
+       However, the highlighted expression is expected to be "local" to the parent
+       region or "global" because it is the function in a tail call.
+```
+
+`[@nontail]` makes the error go away. It does not make the allocation go away.
+It says "fine, do not tail-call it", the region stays, the closures keep getting
+built on every call, and the compiler stops objecting. It reads like a tail-call
+hint. It was really an acknowledgement that something was being allocated.
+
+`[@@zero_alloc]` does not catch this either. It polices *heap* allocation, and
+these closures live in the local region on the stack. So the function carried a
+compiler-checked "allocates nothing" annotation while allocating a closure per
+helper on every single call, and `Gc.minor_words` reports 0.0 words/call for both
+the broken and the fixed version. Neither of the two guardrails that look like
+they cover this actually do. The only thing that pointed at it was the
+`[@nontail]` that had to be there for the code to compile at all.
+
+The fix is to make the helpers closed by passing the state explicitly:
+
+```ocaml
+let rec block i s cs ones mask c n =
+  ...
+  else block Int64_u.(i + #32L) s cs ones mask c n
+in
+block #0L s cs ones mask c n
+```
+
+Nothing is captured, so no closures are built, so no region is needed, so the
+call is an ordinary tail call and `[@nontail]` is gone. The signature noise is
+the price of the mode system being honest with you.
+
+### What it cost
+
+Two effects, both visible in the benchmarks:
+
+- **A fixed ~10 to 13 cycles per call**, from building the closures and opening
+  and closing the region. At `len = 4` the idiomatic version went from 27.9c to
+  14.9c, and at `len = 32` from 34.3c to 22.7c. At small inputs that overhead was
+  most of the function.
+- **~10% of steady-state throughput**, from 0.164 to 0.147 cycles/byte, which
+  closed the gap to the imperative version entirely. A once-per-call allocation
+  cannot explain a per-byte cost; the likely cause is that every recursive call
+  carried an environment pointer and reloaded `cs`, `ones`, `mask` and `n`
+  through it instead of keeping them in registers. That is inference from the
+  numbers, not from reading the emitted code.
+
+One confound worth stating: `-O3` was added to `src/dune` in the same change, so
+the two are not perfectly separated. It does not appear to account for much,
+since the imperative `memchr`, which got the same flag and no structural change,
+moved by under 2% (within run-to-run drift).
+
 ### What makes it OxCaml-flavoured
 
 | Feature | Where | Why |
@@ -100,12 +187,11 @@ Two things make this safe rather than reckless:
 | `int64#` (`Int64_u`) | the whole kernel | Unboxed 64-bit ints. In stock OCaml, `Int64` arithmetic allocates a boxed value per intermediate; here `lxor`, `-`, `land`, `lognot` are raw machine ops on registers. |
 | `%caml_bytes_get64u#` | `Bytes.unsafe_get_int64_ne` | Unaligned 64-bit load out of `bytes` returning an *unboxed* `int64#` directly, no box on the way out. |
 | `..._indexed_by_int64#` | every load in the loops | Indexes the load by an `int64#` rather than a tagged `int`. The loop counter never has to be tagged/untagged just to be used as an offset. |
-| `let mutable i` / `let mutable hit` | `memchr`'s loop state | OxCaml mutable local bindings. Stock OCaml would need `ref` cells. `ml_memchr` deliberately avoids these, which is most of the difference between the two. |
-| `s @ local read` | both signatures | The haystack is taken at `local` mode (it cannot escape) and `read` (it is not mutated). |
+| `let mutable i` / `let mutable hit` | `memchr`'s loop state | OxCaml mutable local bindings. Stock OCaml would need `ref` cells. `ml_memchr` deliberately avoids these, which is now the *only* difference between the two apart from the tail. |
+| `s @ local read` | both signatures | The haystack is taken at `local` mode (it cannot escape) and `read` (it is not mutated). The `local` half is also what made the closure capture in `ml_memchr` expensive. |
 | `@@ portable` | the `external` declarations | Marks the primitives as safe to use across capsules/domains. |
 | `Int64.Unboxed.count_trailing_zeros` | the tail | `tzcnt` on an `int64#`, no boxing at the boundary. |
-| `[@@zero_alloc]` | `src/memchr.mli`, both values | **Compiler-checked.** The build fails if either function ever allocates. This is what turns "I think this is unboxed" into a guarantee. |
-| `[@nontail]` | `ml_memchr`'s entry | Marks the `block #0L` call as not-a-tail-call so the recursion is compiled as a loop rather than growing the stack expectation. |
+| `[@@zero_alloc]` | `src/memchr.mli`, both values | **Compiler-checked.** The build fails if either function ever allocates on the heap. That is a real guarantee, but note the qualifier: it says nothing about the local region. |
 
 ### The part that fights back
 
@@ -127,8 +213,8 @@ structural difference from `benchmarks/swar_stubs.c` and
 `benchmarks/rust/src/lib.rs`.
 
 `ml_memchr` sidesteps this entirely: recursion gives you the early exit for free,
-because `word i` simply *is* the continuation, at the cost of running ~10%
-slower in steady state.
+because `word i` simply *is* the continuation. Now that the closures are gone,
+it does so at no measurable cost.
 
 ## Benchmarks
 
@@ -138,9 +224,9 @@ slower in steady state.
 | --- | --- |
 | `C SIMD memchr` | glibc's `memchr` (`benchmarks/memchr_stubs.c`). Fully vectorized; the ceiling, not a fair SWAR peer. |
 | `C SWAR memchr` | The same 32/8/1 algorithm in C, compiled `-O2 -fno-tree-vectorize`. |
-| `Rust SWAR memchr` | The same algorithm in Rust, built `--release` with `-C no-vectorize-loops -C no-vectorize-slp`. Not the `memchr` crate — hand-written SWAR. |
+| `Rust SWAR memchr` | The same algorithm in Rust, built `--release` with `-C no-vectorize-loops -C no-vectorize-slp`. Not the `memchr` crate, but hand-written SWAR. |
 | `ML style SWAR memchr` | `Memchr.ml_memchr`, the idiomatic recursive version. |
-| `ML optimized SWAR memchr` | `Memchr.memchr`, mutable locals + `ctz` tail. |
+| `ML imperative SWAR memchr` | `Memchr.memchr`, mutable locals + `ctz` tail. |
 | `Bytes.index_opt` | OCaml stdlib. Byte-at-a-time baseline. |
 
 Auto-vectorization is explicitly **disabled** for the C and Rust SWAR builds.
@@ -159,43 +245,42 @@ nothing is folded away, and the C/Rust entry points are `[@@noalloc]`.
 ### Results
 
 11th Gen Intel Core i7-11800H, OxCaml 5.2.0+ox (flambda2), gcc 16.1.1, rustc
-1.97.1, glibc 2.44, `-quota 3`.
+1.97.1, glibc 2.44, `dune build --profile release`, `-quota 3`.
 
 Cycles per run (lower is better):
 
-| len | C SIMD | C SWAR | Rust SWAR | ML style | **ML optimized** | `Bytes.index_opt` |
+| len | C SIMD | C SWAR | Rust SWAR | ML style | ML imperative | `Bytes.index_opt` |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 4 | 10.4 | 14.1 | 15.1 | 27.9 | **12.9** | 12.6 |
-| 8 | 10.4 | 16.7 | 17.0 | 36.7 | **14.8** | 15.8 |
-| 16 | 10.5 | 17.4 | 19.0 | 37.0 | **16.4** | 23.3 |
-| 32 | 10.4 | 17.7 | 19.0 | 34.3 | **18.6** | 56.8 |
-| 64 | 12.1 | 19.6 | 20.9 | 33.0 | **23.9** | 88.3 |
-| 128 | 13.6 | 28.2 | 28.3 | 45.1 | **32.2** | 145.2 |
-| 256 | 15.5 | 41.7 | 42.7 | 68.9 | **50.5** | 268.0 |
-| 1024 | 27.5 | 130.2 | 130.7 | 186.7 | **164.9** | 968.8 |
-| 4096 | 60.9 | 444.7 | 431.2 | 636.8 | **565.8** | 3 781.0 |
-| 65536 | 1 119.8 | 6 633.7 | 6 300.4 | 9 494.5 | **8 536.6** | 60 987.0 |
+| 4 | 10.8 | 14.5 | 14.7 | 14.9 | **13.0** | 11.8 |
+| 8 | 11.0 | 18.0 | 16.2 | 26.9 | **14.8** | 16.1 |
+| 16 | 10.8 | 18.2 | 17.8 | 28.5 | **16.9** | 23.9 |
+| 32 | 10.9 | 18.9 | 18.7 | 22.7 | **19.7** | 57.5 |
+| 64 | 12.4 | 20.1 | 20.1 | 22.9 | **25.4** | 89.6 |
+| 128 | 14.3 | 29.1 | 29.1 | 35.8 | **33.5** | 151.6 |
+| 256 | 17.4 | 44.0 | 42.3 | 59.6 | **55.1** | 268.7 |
+| 1024 | 28.6 | 132.9 | 134.5 | 172.5 | **169.3** | 993.8 |
+| 4096 | 62.8 | 454.5 | 436.5 | 583.9 | **587.6** | 3 857.7 |
+| 65536 | 1 162.7 | 6 743.5 | 6 423.8 | 8 691.0 | **8 693.5** | 61 856.6 |
 
 Nanoseconds per run:
 
-| len | C SIMD | C SWAR | Rust SWAR | ML style | **ML optimized** | `Bytes.index_opt` |
+| len | C SIMD | C SWAR | Rust SWAR | ML style | ML imperative | `Bytes.index_opt` |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 4 | 4.51 | 6.12 | 6.53 | 12.09 | **5.58** | 5.47 |
-| 8 | 4.51 | 7.25 | 7.35 | 15.94 | **6.43** | 6.86 |
-| 16 | 4.56 | 7.56 | 8.23 | 16.04 | **7.14** | 10.12 |
-| 32 | 4.53 | 7.68 | 8.23 | 14.88 | **8.07** | 24.64 |
-| 64 | 5.24 | 8.49 | 9.08 | 14.33 | **10.35** | 38.33 |
-| 128 | 5.91 | 12.23 | 12.28 | 19.55 | **13.98** | 63.02 |
-| 256 | 6.72 | 18.10 | 18.51 | 29.92 | **21.92** | 116.31 |
-| 1024 | 11.94 | 56.53 | 56.75 | 81.02 | **71.57** | 420.49 |
-| 4096 | 26.44 | 193.01 | 187.16 | 276.37 | **245.57** | 1 641.04 |
-| 65536 | 486.00 | 2 879.18 | 2 734.54 | 4 120.85 | **3 705.12** | 26 469.90 |
+| 4 | 4.71 | 6.31 | 6.37 | 6.47 | **5.62** | 5.14 |
+| 8 | 4.76 | 7.81 | 7.03 | 11.67 | **6.44** | 6.97 |
+| 16 | 4.68 | 7.90 | 7.73 | 12.37 | **7.33** | 10.35 |
+| 32 | 4.72 | 8.19 | 8.13 | 9.83 | **8.56** | 24.95 |
+| 64 | 5.38 | 8.73 | 8.72 | 9.96 | **11.01** | 38.87 |
+| 128 | 6.19 | 12.65 | 12.63 | 15.55 | **14.54** | 65.82 |
+| 256 | 7.55 | 19.08 | 18.38 | 25.87 | **23.93** | 116.61 |
+| 1024 | 12.41 | 57.70 | 58.36 | 74.88 | **73.47** | 431.33 |
+| 4096 | 27.23 | 197.25 | 189.46 | 253.45 | **255.03** | 1 674.34 |
+| 65536 | 504.64 | 2 926.88 | 2 788.09 | 3 772.14 | **3 773.20** | 26 847.35 |
 
-A second run of the same binary came out 2-6% higher on *every* row, glibc and
-the stdlib baseline included, likely due to whole-machine drift (no frequency pinning)
-and not a per-implementation effect. The ratios between implementations moved by less
-than 5%, so the table above is the cooler of the two runs and the comparisons below
-are averaged across both.
+A second run of the same binary agreed within ~1% on every row, so the ratios
+below are averaged across both. That is tighter than the 2-6% whole-machine drift
+seen in earlier sessions; there is still no frequency pinning, so treat absolute
+numbers as machine-specific and the ratios as the durable part.
 
 ### Steady-state throughput
 
@@ -205,11 +290,11 @@ over both runs):
 
 | Implementation | cycles/byte | bytes/cycle |
 | --- | ---: | ---: |
-| C SIMD memchr (AVX2) | 0.019 | ~51.9 |
-| Rust SWAR | 0.107 | ~9.3 |
-| C SWAR | 0.113 | ~8.8 |
-| **ML optimized SWAR** | **0.148** | **~6.7** |
-| ML style SWAR | 0.164 | ~6.1 |
+| C SIMD memchr (AVX2) | 0.020 | ~50.4 |
+| Rust SWAR | 0.108 | ~9.3 |
+| C SWAR | 0.114 | ~8.8 |
+| **ML imperative SWAR** | **0.146** | **~6.8** |
+| ML style SWAR | 0.147 | ~6.8 |
 | `Bytes.index_opt` | 1.044 | ~0.96 |
 
 The three languages' SWAR loops land in the same band, well above the ~1
@@ -219,37 +304,44 @@ really is byte-at-a-time.
 
 ### Reading the results
 
-**The unboxing works.** ~6.7 bytes/cycle is not achievable if `int64#` values are
-being boxed: a single allocation per iteration would show up immediately as a
+**The unboxing works.** ~6.8 bytes/cycle is not achievable if `int64#` values are
+being boxed: a single heap allocation per iteration would show up immediately as a
 collapse toward the stdlib line. The `[@@zero_alloc]` check holds this in place at
 build time.
 
-**Small-input wins are algorithmic, not linguistic.** At `len ≤ 16` the optimized
-OCaml beats both C and Rust (12.9c vs 14.1c/15.1c at `len = 4`). This is *not*
+**Idiomatic now costs nothing in steady state.** `ml_memchr` and `memchr` are
+0.147 and 0.146 cycles/byte, a gap well inside run-to-run noise. Before the
+closure fix the idiomatic version was ~10% behind. The recursive, immutable,
+tail-call version of this algorithm is not slower than the mutable-loop version;
+it was only slower because it was quietly allocating.
+
+**Small-input wins are algorithmic, not linguistic.** At `len ≤ 16` the imperative
+OCaml beats both C and Rust (13.0c vs 14.5c/14.7c at `len = 4`). This is *not*
 OxCaml outrunning C. It is the `ctz` tail beating a byte-at-a-time tail: at these
 sizes the tail is the entire function. Give the C reference the same tail and it
 would win again. The honest language comparison is the steady-state number.
 
-**The steady-state gap is ~1.3–1.4×, and it is loop shape.** The kernel is the
+**Where the two OCaml versions still differ is the tail, not the loop.**
+`ml_memchr` is 26.9c at `len = 8` against `memchr`'s 14.8c, because it walks the
+final partial word one byte at a time while `memchr` resolves it with one `tzcnt`.
+That difference is deliberate: `ml_memchr` is there to show what the idiomatic
+formulation costs, and a `ctz` tail is not the idiomatic formulation.
+
+**The steady-state gap to C is ~1.28x, and it is loop shape.** The kernel is the
 same handful of ALU ops everywhere; what differs is the `break` emulation. C and
 Rust leave the loop; OCaml computes a new cursor value on every iteration whether
 or not it found anything.
 
-**Idiomatic costs ~10%.** `ml_memchr` runs at 6.1 B/c against the optimized 6.7
-B/c, meaning the recursive version is *not* catastrophically slower, and it is
-still 6.4× faster than the stdlib. Most of its extra cost is at small sizes (27.9c
-vs 12.9c at `len = 4`), where it pays full tier setup and then walks the tail one
-byte at a time. If you want the readable version, it is not a disaster.
-
-**Nothing beats glibc, and nothing was going to.** At 64 KiB glibc is 7.6× faster
-than the optimized OCaml and 5.9× faster than the C SWAR it is measured against.
+**Nothing beats glibc, and nothing was going to.** At 64 KiB glibc is 7.5x faster
+than the imperative OCaml and 5.8x faster than the C SWAR it is measured against.
 That gap is AVX2 versus 64-bit registers, and it is the reason the interesting
-number is the ~1.3× against C SWAR rather than the 7.6× against glibc.
+number is the ~1.28x against C SWAR rather than the 7.5x against glibc.
 
 **Allocation column.** `core_bench` reports a uniform `3.00w` per run for *every*
 row, including the `[@@noalloc]` C stubs. This is harness overhead in the staged
-closure, not the implementations. The real allocation claim here is the
-compiler-checked `[@@zero_alloc]`, not this column.
+closure, not the implementations. It is also, as the `[@nontail]` section shows,
+not a column that can prove much: it never moved while `ml_memchr` was allocating
+in the local region.
 
 ## Building and running
 
@@ -266,6 +358,7 @@ dune test                       # inline tests
 `dune build` covers everything: the root `dune` defines a `default` alias
 depending on `benchmarks/memchr_bench.exe` and `(alias_rec src/all)`, and the
 `ml-memchr` package is marked `(allow_empty)` since it has no install stanza.
+The library itself is built with `-O3` via `ocamlopt_flags` in `src/dune`.
 If you're doing profiling, ensure that you run `dune build --profile release`
 for accurate numbers, otherwise dune may simply produce the debug build.
 
@@ -295,9 +388,8 @@ benchmarks/rust/src/lib.rs   Rust SWAR reference (vectorization disabled)
 
 ## Caveats
 
-- Single machine, single microarchitecture, no frequency pinning. Run-to-run
-  drift of a few percent is visible; ratios are stable, absolute numbers are not
-  a portable claim.
+- Single machine, single microarchitecture, no frequency pinning. Ratios are
+  stable across runs; absolute numbers are not a portable claim.
 - One haystack shape (needle at ~90%, uniform filler). Hit-early, no-hit, and
   unaligned-start distributions are not measured.
 - The `ctz` tail in `memchr` is little-endian-only and has been built and tested
