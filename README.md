@@ -257,14 +257,17 @@ Requires an OxCaml switch (developed on `5.2.0+ox`) and `cargo` for the Rust
 comparison.
 
 ```sh
-dune build     # builds the library and benchmark executable
-dune test      # inline tests
+dune build                      # builds the library and benchmark executable
+dune build --profile release    # builds an optimized executable for benchmarks
+dune test                       # inline tests
 ./_build/default/benchmarks/memchr_bench.exe time cycles percentage -quota 3 -ascii
 ```
 
 `dune build` covers everything: the root `dune` defines a `default` alias
 depending on `benchmarks/memchr_bench.exe` and `(alias_rec src/all)`, and the
 `ml-memchr` package is marked `(allow_empty)` since it has no install stanza.
+If you're doing profiling, ensure that you run `dune build --profile release`
+for accurate numbers, otherwise dune may simply produce the debug build.
 
 The Rust static library is built by a dune rule shelling out to `cargo build
 --release --offline`, so `benchmarks/rust` must build without network access
