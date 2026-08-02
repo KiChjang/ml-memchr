@@ -8,6 +8,9 @@ external c_swar_memchr : bytes -> char -> int -> int = "ml_bytes_swar_memchr"
 
 external rs_memchr : bytes -> char -> int -> int = "ml_rs_memchr" [@@noalloc]
 
+external rs_idiomatic_memchr : bytes -> char -> int -> int = "ml_rs_safe_memchr"
+[@@noalloc]
+
 let haystack len =
   let bytes = Bytes.make len 'a' in
   let i = len - (len / 10) - 1 in
@@ -25,10 +28,14 @@ let tests =
         let s = haystack len in
         Core.Staged.stage (fun () ->
             Sys.opaque_identity (c_swar_memchr s 'z' len)));
-    Bench.Test.create_indexed ~name:"Rust SWAR memchr"
+    Bench.Test.create_indexed ~name:"Rust imperative SWAR memchr"
       ~args:[ 4; 8; 16; 32; 64; 128; 256; 1024; 4096; 65536 ] (fun len ->
         let s = haystack len in
         Core.Staged.stage (fun () -> Sys.opaque_identity (rs_memchr s 'z' len)));
+    Bench.Test.create_indexed ~name:"Rust safe SWAR memchr"
+      ~args:[ 4; 8; 16; 32; 64; 128; 256; 1024; 4096; 65536 ] (fun len ->
+        let s = haystack len in
+        Core.Staged.stage (fun () -> Sys.opaque_identity (rs_idiomatic_memchr s 'z' len)));
     Bench.Test.create_indexed ~name:"ML style SWAR memchr"
       ~args:[ 4; 8; 16; 32; 64; 128; 256; 1024; 4096; 65536 ] (fun len ->
         let s = haystack len in
