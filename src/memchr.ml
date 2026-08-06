@@ -114,11 +114,12 @@ let[@inline always] swar_raw w cs ones =
 
 let[@inline always] rec scan_bytes i s c n =
   if Int64_u.(i >= n) then -1
-  else if ((Bytes.unsafe_get_int8_indexed_by_int64 s i) land 0xFF) = Char.code c then (Int64_u.to_int i)
+  else if Bytes.unsafe_get_int8_indexed_by_int64 s i land 0xFF = Char.code c
+  then Int64_u.to_int i
   else scan_bytes Int64_u.(i + #1L) s c n
 
 let[@inline always] rec scan_word i s cs ones mask c n =
-  if Int64_u.((i + #8L) > n) then scan_bytes i s c n
+  if Int64_u.(i + #8L > n) then scan_bytes i s c n
   else if
     Int64_u.(
       swar_raw (Bytes.unsafe_get_int64_ne_indexed_by_int64 s i) cs ones
@@ -129,7 +130,8 @@ let[@inline always] rec scan_word i s cs ones mask c n =
 
 let ml_memchr (s @ local read) c n =
   let rec scan_block i s cs ones mask c n =
-    if Int64_u.to_int i + 32 > n then scan_word i s cs ones mask c (Int64_u.of_int n)
+    if Int64_u.to_int i + 32 > n then
+      scan_word i s cs ones mask c (Int64_u.of_int n)
     else
       let r0 =
         swar_raw (Bytes.unsafe_get_int64_ne_indexed_by_int64 s i) cs ones
@@ -151,7 +153,8 @@ let ml_memchr (s @ local read) c n =
       in
       let rs = Int64_u.(r0 lor r1 lor (r2 lor r3)) in
       if Int64_u.(rs land mask <> #0L) then
-        if Int64_u.(r0 land mask <> #0L) then scan_word i s cs ones mask c (Int64_u.of_int n)
+        if Int64_u.(r0 land mask <> #0L) then
+          scan_word i s cs ones mask c (Int64_u.of_int n)
         else if Int64_u.(r1 land mask <> #0L) then
           scan_word Int64_u.(i + #8L) s cs ones mask c (Int64_u.of_int n)
         else if Int64_u.(r2 land mask <> #0L) then
