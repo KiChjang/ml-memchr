@@ -23,6 +23,11 @@ let tests =
       ~args:[ 4; 8; 16; 32; 64; 128; 256; 1024; 4096; 65536 ] (fun len ->
         let s = haystack len in
         Core.Staged.stage (fun () -> Sys.opaque_identity (c_memchr s 'z' len)));
+    Bench.Test.create_indexed ~name:"ML SIMD memchr"
+      ~args:[ 4; 8; 16; 32; 64; 128; 256; 1024; 4096; 65536 ] (fun len ->
+        let s = haystack len in
+        Core.Staged.stage (fun () ->
+            Sys.opaque_identity (Memchr.simd_memchr s 'z' len)));
     Bench.Test.create_indexed ~name:"C SWAR memchr"
       ~args:[ 4; 8; 16; 32; 64; 128; 256; 1024; 4096; 65536 ] (fun len ->
         let s = haystack len in

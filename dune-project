@@ -31,7 +31,9 @@
   core
   core_bench
   core_unix
-  ocaml_intrinsics_kernel
+  ocaml_intrinsics
+  ocaml_simd_avx
+  ocaml_simd_sse
   ppx_assert
   ppx_inline_test)
  (tags

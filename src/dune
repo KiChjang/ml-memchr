@@ -1,7 +1,7 @@
 (library
  (name memchr)
  (ocamlopt_flags (:standard -O3))
- (libraries base ocaml_intrinsics_kernel stdlib_upstream_compatible)
+ (libraries base ocaml_intrinsics ocaml_simd.avx ocaml_simd.sse stdlib_stable stdlib_upstream_compatible)
  (preprocess
    (pps ppx_inline_test ppx_assert))
  (inline_tests))
