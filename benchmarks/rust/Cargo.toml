@@ -6,5 +6,8 @@ edition = "2024"
 [lib]
 crate-type = ["staticlib"]
 
+[dependencies]
+memchr = "2"
+
 [profile.release]
 opt-level = 3

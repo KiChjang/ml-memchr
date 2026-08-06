@@ -18,32 +18,34 @@ staying in OCaml cost once you are allowed real SIMD?
 
 The Rust side mirrors the first split, with a raw-pointer version and a
 mostly-safe iterator version, so the "idiomatic tax" can be compared across both
-languages rather than just asserted about one. See
-[The two Rust versions](#the-two-rust-versions).
+languages rather than just asserted about one. It also carries the
+[`memchr` crate](https://crates.io/crates/memchr) as a second production SIMD
+reference alongside glibc. See [The two Rust versions](#the-two-rust-versions)
+and [The Rust `memchr` crate](#the-rust-memchr-crate).
 
 All three OCaml versions are `[@@zero_alloc]`-checked. The headline results, at 64 KiB:
 
 | | vs. C SWAR | vs. safe Rust | vs. `Bytes.index_opt` |
 | --- | --- | --- | --- |
-| `memchr` (imperative SWAR) | ~1.29x slower | ~1.11x slower | ~7.2x faster |
-| `ml_memchr` (idiomatic SWAR) | ~1.30x slower | ~1.11x slower | ~7.2x faster |
+| `memchr` (imperative SWAR) | ~1.23x slower | ~1.13x slower | ~8.4x faster |
+| `ml_memchr` (idiomatic SWAR) | ~1.23x slower | ~1.13x slower | ~8.4x faster |
 
 That middle column is arguably the fairest one in the whole document. Measured
-against C, OCaml gives up ~29%; measured against Rust code written at a
-comparable level of abstraction, it gives up ~11%.
+against C, OCaml gives up ~23%; measured against Rust code written at a
+comparable level of abstraction, it gives up ~13%.
 
-And then the SIMD version, which is measured against a different opponent
-entirely:
+And then the SIMD version, which is measured against two production
+implementations rather than against the scalar-only references. These are
+steady-state ratios, so they describe the inner loop rather than the whole call:
 
-| | vs. glibc `memchr` | vs. `memchr` (SWAR) | vs. `Bytes.index_opt` |
-| --- | --- | --- | --- |
-| `simd_memchr` | ~1.03x slower | ~7.4x faster | ~54x faster |
+| | vs. glibc | vs. Rust `memchr` crate | vs. `memchr` (SWAR) | vs. `Bytes.index_opt` |
+| --- | --- | --- | --- | --- |
+| `simd_memchr` | ~1.06x slower | ~1.05x **faster** | ~7.1x faster | ~60x faster |
 
-**In steady state `simd_memchr` matches glibc exactly**: 0.0194 cycles/byte
-against 0.0194, or ~51.5 bytes/cycle for both, reproduced across four runs. The
-remaining ~3% at 64 KiB is fixed per-call overhead, not throughput. That is
-hand-written OxCaml drawing level with the vendor `memchr` on inner-loop
-speed. See [The SIMD version](#the-simd-version).
+Hand-written OxCaml lands **between the two production SIMD implementations**:
+~6% off glibc's inner loop and ~5% ahead of the `memchr` crate's, in steady state.
+See [The SIMD version](#the-simd-version) for why the crate comparison is the
+weaker of the two claims.
 
 The idiomatic OCaml version used to trail the imperative one by ~10% in steady
 state. It no longer does, and the reason it did turned out to be more interesting
@@ -135,8 +137,9 @@ Two things make this safe rather than reckless:
 ## The SIMD version
 
 `simd_memchr` drops SWAR and uses `ocaml_simd`'s vector types directly. It is the
-one implementation here that is not deliberately hobbled, and it is measured
-against glibc rather than against the C SWAR reference.
+one implementation here written to be as fast as the machine allows rather than
+constrained to a fixed algorithm, so it is measured against glibc rather than
+against the C SWAR reference.
 
 The needle is broadcast into a 32-byte vector once, and the whole search is
 vector compare plus `movemask` plus `ctz`:
@@ -210,38 +213,54 @@ exercised; see [Tests](#tests).
 
 ### What it buys
 
-| len | `simd_memchr` | glibc | `memchr` (SWAR) |
-| ---: | ---: | ---: | ---: |
-| 16 | **10.1c** | 10.8c | 16.6c |
-| 256 | **17.3c** | 16.0c | 51.7c |
-| 4096 | **97.3c** | 62.6c | 581.3c |
-| 65536 | **1 171.7c** | 1 136.3c | 8 729.8c |
+| len | `simd_memchr` | glibc | Rust `memchr` crate | `memchr` (SWAR) |
+| ---: | ---: | ---: | ---: | ---: |
+| 16 | **10.8c** | 10.5c | 14.8c | 16.2c |
+| 256 | **17.1c** | 16.6c | 21.9c | 50.8c |
+| 4096 | **96.5c** | 62.6c | 80.8c | 568.0c |
+| 65536 | **1 229.4c** | 1 134.1c | 1 269.2c | 8 602.4c |
 
-Steady state, taking the slope between 4096 and 65536, the two are
-indistinguishable:
+Steady state, taking the slope between 4096 and 65536:
 
-| | cycles/byte | bytes/cycle |
-| --- | ---: | ---: |
-| glibc `__memchr_evex` | 0.0194 | ~51.5 |
-| `simd_memchr` | 0.0194 | ~51.5 |
+| | cycles/byte | bytes/cycle | vs. glibc |
+| --- | ---: | ---: | ---: |
+| glibc `__memchr_evex` | 0.0194 | ~51.6 | 1.00x |
+| **`simd_memchr`** | **0.0205** | **~48.8** | **1.06x** |
+| Rust `memchr` crate 2.8.3 | 0.0215 | ~46.5 | 1.11x |
 
-Per-run slopes were 0.0194 / 0.0195 / 0.0194 / 0.0194 for glibc and 0.0194 /
-0.0195 / 0.0198 / 0.0193 for `simd_memchr`. The difference is smaller than the
-run-to-run variation of either.
+So the OCaml sits between the two production implementations. Both comparisons
+deserve separate treatment, because they are not equally strong.
 
-Worth being precise about what this does and does not say. It says the *inner
-loop* is as good as glibc's, which is the part that was written in OCaml. It does
-not say the function is as good as glibc's, because it is not: at 4096 bytes it
-is 1.55x behind, and the fitted fixed overhead is ~26 cycles against roughly zero
-for glibc. glibc spends real effort on short inputs and on page-cross safety;
-`simd_memchr` falls off a cliff into a byte-at-a-time tail instead. At `len = 8`
-it is the second slowest thing in the whole table.
+**Against glibc, ~6% behind is a real gap.** The two separate cleanly, by far more
+than the within-run confidence interval on either. Unpinned, the measurement is
+not good enough to see it: run the same benchmark without `taskset` and the two
+rows land on top of each other at 0.0194, which is an artifact of the noise floor
+rather than a tie. Pin the core and the gap is stable.
+
+**Against the Rust crate, ~5% ahead is a weak claim,** and it should not be read
+as "OxCaml beats Rust". The `memchr` crate is solving a much harder problem than
+`simd_memchr` is: runtime CPU feature detection and dispatch, a portable fallback,
+correct behaviour on every input length, and no assumption whatsoever about
+alignment or architecture. `simd_memchr` assumes AVX2 exists, assumes x86-64,
+assumes little-endian, and is tuned against exactly one haystack shape, which
+happens to be the one being measured. A 5% win under those conditions says the
+inner loop is competitive. It does not say the function is better.
+
+Worth being precise about the rest, too. The steady-state number describes the
+*inner loop*, which is the part written in OCaml. It does not describe the whole
+function, which is meaningfully worse than glibc's: at 4096 bytes `simd_memchr`
+is 1.54x behind, and extrapolating the two-point fit back to zero length puts
+~26 cycles of fixed overhead on it against roughly none for glibc. The Rust crate
+beats it at 4096 too (80.8c against 96.5c), for the same reason. glibc and the
+crate both spend real effort on short inputs; `simd_memchr` falls off a cliff into
+a byte-at-a-time tail instead, and at `len = 8` it is one of the slowest rows in
+the whole table.
 
 Note also that glibc is not running AVX2 here. On this machine `memchr` resolves
 to `__memchr_evex`, which uses EVEX encoding, the upper vector registers and `k`
 mask registers. Both are 256 bits wide per compare, so the throughput comparison
-is fair, but the vendor implementation is using a newer instruction set than the
-OxCaml one and still does not pull ahead in the loop.
+is fair, but the vendor implementation is reaching for a newer instruction set to
+get its ~6%.
 
 ## The `[@nontail]` trap
 
@@ -449,11 +468,60 @@ block except the one the FFI signature forces.
 
 ### Correctness
 
-Both Rust versions were checked against a naive byte scan over 200,000 randomized
-haystacks (random lengths to 300, random needle placement including no-needle
-cases) plus an exhaustive sweep placing the needle at every position for every
-length from 0 to 200, which covers all three tier boundaries and both narrowing
-paths. Zero mismatches.
+All three Rust entry points were checked against a naive byte scan over
+**536,703 cases** with zero mismatches: every needle position for every length
+from 0 to 400, dense random haystacks over a two-character alphabet up to 3000
+bytes, no-needle cases, and high-bit needles (`\xff` against `\xfe` filler,
+`\x80` against NUL filler) to rule out signed-versus-unsigned confusion.
+
+## The Rust `memchr` crate
+
+`rs_simd_memchr` is not another hand-written implementation. It is the
+[`memchr` crate](https://crates.io/crates/memchr), version 2.8.3, behind a
+three-line shim:
+
+```rust
+#[unsafe(no_mangle)]
+pub extern "C" fn rs_simd_memchr(p: *const u8, needle: u8, len: usize) -> isize {
+    let slice = unsafe { std::slice::from_raw_parts(p, len) };
+    memchr::memchr(needle, slice).map(|found| found as isize).unwrap_or(-1)
+}
+```
+
+It is here as a **second production reference** next to glibc. Two independently
+tuned, widely deployed SIMD `memchr` implementations bracket the OxCaml one much
+more usefully than either does alone, and they disagree with each other by ~11%,
+which is itself a useful calibration for how much any single number here is worth.
+
+The crate is vendored into `benchmarks/rust/vendor` with a `.cargo/config.toml`
+source replacement, so the dune rule's `cargo build --offline` still works without
+network access.
+
+### Do the no-vectorize flags affect the crate?
+
+Worth checking, because the dune rule sets
+`RUSTFLAGS="-C no-vectorize-loops -C no-vectorize-slp"` for the whole cargo
+invocation, and that now includes a dependency whose entire purpose is
+vectorization. If those flags applied, the comparison would be worthless.
+
+They do not. The crate reaches SIMD through explicit `core::arch` intrinsics
+guarded by runtime feature detection, not through the loop vectorizer, and LLVM's
+vectorizer flags have no effect on intrinsics. Building the same crate twice and
+timing a 64 KiB scan confirms it:
+
+| Build | ns/call | bytes/ns |
+| --- | ---: | ---: |
+| with `-C no-vectorize-loops -C no-vectorize-slp` | 547.0 | ~107.8 |
+| without | 568.4 | ~103.8 |
+
+The flagged build is marginally *faster*, which is run-to-run noise. There is no
+penalty. The sustained ~48 bytes/cycle it reaches in the benchmark proper is also
+far outside anything a scalar loop could do, which is a second confirmation.
+
+Auto-vectorization is suppressed for the SWAR rows and only for them. That is
+deliberate: those exist to compare one algorithm across three languages, and
+letting the compiler silently substitute a different algorithm would defeat the
+point.
 
 ## Benchmarks
 
@@ -461,8 +529,9 @@ paths. Zero mismatches.
 
 | Name | What it is |
 | --- | --- |
-| `C SIMD memchr` | glibc's `memchr` (`benchmarks/memchr_stubs.c`). Resolves to `__memchr_evex` on this machine. The ceiling, and the only fair peer for `ML SIMD`. |
-| `ML SIMD memchr` | `Memchr.simd_memchr`. AVX2 via `ocaml_simd`, 128/32/16/8/1 tiers. Not hobbled. |
+| `C SIMD memchr` | glibc's `memchr` (`benchmarks/memchr_stubs.c`). Resolves to `__memchr_evex` on this machine. Production SIMD reference. |
+| `Rust SIMD memchr` | The `memchr` crate 2.8.3 behind an FFI shim. Second production SIMD reference. Not written for this project. |
+| `ML SIMD memchr` | `Memchr.simd_memchr`. AVX2 via `ocaml_simd`, 128/32/16/8/1 tiers. No compiler restrictions. |
 | `C SWAR memchr` | The same 32/8/1 algorithm in C, compiled `-O2 -fno-tree-vectorize`. |
 | `Rust imperative SWAR memchr` | `rs_memchr`. Raw pointers, `read_unaligned`, `unsafe` on every load. |
 | `Rust safe SWAR memchr` | `rs_safe_memchr`. Iterators and slices, one `unsafe` block at the FFI boundary. |
@@ -490,122 +559,148 @@ scans roughly 90% of the buffer before hitting, making it a mostly-miss scan, wh
 is the case SWAR is supposed to win. All calls go through `Sys.opaque_identity` so
 nothing is folded away, and the C/Rust entry points are `[@@noalloc]`.
 
-### Results
+### Methodology
 
 11th Gen Intel Core i7-11800H, OxCaml 5.2.0+ox (flambda2), gcc 16.1.1, rustc
-1.97.1, glibc 2.44, `dune build --profile release`, `-quota 3`.
+1.97.1, glibc 2.44, `memchr` crate 2.8.3, `dune build --profile release`.
 
-All numbers below are the **median of four runs** of the same binary. This round
-was noisier than earlier ones: the SWAR rows varied by up to ~25% between runs at
-small lengths, so a two-run average would not have been trustworthy. Medians are
-quoted instead. `ML SIMD` was the steadiest row in the table, never exceeding 7.6%
-spread and staying under 3.2% at 1024 bytes and above; `C SIMD` was comparably
-steady except at `len = 4` and `len = 8`, where the absolute values are ~10 cycles
-and a fraction of a cycle of jitter is a large percentage.
+```sh
+taskset -c 9 ./_build/default/benchmarks/memchr_bench.exe \
+  +time +cycles percentage -quota 3 -ascii -ci-absolute
+```
+
+This is a **single run pinned to one core**. Pinning is doing the work that
+repetition would otherwise have to: unpinned, this benchmark drifts by up to ~25%
+between runs at small lengths, and averaging several noisy runs is a much weaker
+tool than removing the noise source. Most of that variance is the process being
+migrated between cores, and `taskset` deletes it outright.
+
+The `+cycles` and `+time` prefixes ask `core_bench` for 95% confidence intervals
+on each estimate, so uncertainty is reported per row from within the run instead
+of being inferred from repeated runs. Those intervals are tight: at `len = 65536`
+they are ±0.3% for glibc, ±0.9% for `ML SIMD`, and ±0.2% for `ML imperative`. Where
+`core_bench` prints no interval at all, it is below display resolution.
+
+One caveat this does not fix. A within-run confidence interval measures sampling
+noise inside one process. It does not capture whatever differs *between*
+processes: heap layout, haystack alignment, and frequency state. Two rows sitting
+within a percent of each other should therefore be read as "too close to call"
+rather than as a ranking, so treat the intervals as a lower bound on real
+uncertainty and the cross-row ratios within this table as the durable part.
 
 Cycles per run (lower is better):
 
-| len | glibc | **ML SIMD** | C SWAR | Rust imp. | Rust safe | ML style | ML imp. | `index_opt` |
-| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 4 | 10.7 | **15.0** | 14.1 | 15.0 | 14.9 | 13.5 | 14.3 | 13.8 |
-| 8 | 10.7 | **19.0** | 16.7 | 17.0 | 15.5 | 21.8 | 15.3 | 20.1 |
-| 16 | 10.8 | **10.1** | 17.4 | 18.5 | 16.7 | 23.3 | 16.6 | 31.0 |
-| 32 | 10.8 | **10.7** | 18.3 | 18.8 | 16.9 | 21.4 | 19.4 | 64.5 |
-| 64 | 12.5 | **18.1** | 19.9 | 20.2 | 20.0 | 22.6 | 25.5 | 94.8 |
-| 128 | 14.1 | **20.1** | 29.1 | 29.2 | 28.5 | 33.7 | 34.0 | 154.9 |
-| 256 | 16.0 | **17.3** | 43.7 | 46.1 | 42.2 | 55.0 | 51.7 | 277.2 |
-| 1024 | 28.4 | **31.9** | 136.2 | 139.3 | 149.8 | 176.1 | 170.7 | 996.0 |
-| 4096 | 62.6 | **97.3** | 459.9 | 452.3 | 515.8 | 590.1 | 581.3 | 3 876.0 |
-| 65536 | 1 136.3 | **1 171.7** | 6 762.3 | 6 494.2 | 7 887.2 | 8 774.6 | 8 729.8 | 63 264.7 |
+| len | glibc | Rust crate | **ML SIMD** | C SWAR | Rust imp. | Rust safe | ML style | ML imp. | `index_opt` |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 4 | 10.1 | 15.9 | **14.6** | 14.9 | 15.7 | 13.9 | 13.9 | 13.2 | 12.4 |
+| 8 | 10.2 | 19.8 | **19.0** | 17.8 | 17.5 | 14.6 | 17.5 | 14.3 | 18.8 |
+| 16 | 10.5 | 14.8 | **10.8** | 18.9 | 18.5 | 15.8 | 19.1 | 16.2 | 29.9 |
+| 32 | 10.8 | 16.2 | **11.2** | 19.0 | 18.8 | 15.9 | 20.0 | 19.1 | 63.8 |
+| 64 | 12.0 | 19.5 | **17.8** | 20.5 | 20.4 | 18.8 | 21.8 | 25.2 | 103.3 |
+| 128 | 14.1 | 22.0 | **19.6** | 30.1 | 28.0 | 26.1 | 32.9 | 33.7 | 177.7 |
+| 256 | 16.6 | 21.9 | **17.1** | 45.1 | 41.7 | 41.5 | 53.1 | 50.8 | 329.9 |
+| 1024 | 27.7 | 33.7 | **30.9** | 136.3 | 131.8 | 143.4 | 168.5 | 167.1 | 1 222.2 |
+| 4096 | 62.6 | 80.8 | **96.5** | 463.6 | 433.2 | 502.4 | 575.4 | 568.0 | 4 856.1 |
+| 65536 | 1 134.1 | 1 269.2 | **1 229.4** | 7 011.5 | 6 370.1 | 7 631.0 | 8 620.4 | 8 602.4 | 72 332.7 |
 
 Nanoseconds per run:
 
-| len | glibc | **ML SIMD** | C SWAR | Rust imp. | Rust safe | ML style | ML imp. | `index_opt` |
-| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 4 | 4.66 | **6.53** | 6.13 | 6.53 | 6.46 | 5.85 | 6.19 | 6.00 |
-| 8 | 4.63 | **8.26** | 7.25 | 7.38 | 6.75 | 9.45 | 6.65 | 8.71 |
-| 16 | 4.71 | **4.36** | 7.55 | 8.03 | 7.25 | 10.10 | 7.21 | 13.47 |
-| 32 | 4.69 | **4.65** | 7.96 | 8.16 | 7.34 | 9.31 | 8.43 | 27.98 |
-| 64 | 5.42 | **7.84** | 8.62 | 8.79 | 8.67 | 9.82 | 11.07 | 41.13 |
-| 128 | 6.11 | **8.72** | 12.62 | 12.69 | 12.36 | 14.61 | 14.76 | 67.25 |
-| 256 | 6.94 | **7.50** | 18.96 | 20.02 | 18.30 | 23.86 | 22.42 | 120.34 |
-| 1024 | 12.34 | **13.87** | 59.13 | 60.48 | 65.03 | 76.44 | 74.09 | 432.28 |
-| 4096 | 27.18 | **42.23** | 199.62 | 196.33 | 223.87 | 256.14 | 252.32 | 1 682.34 |
-| 65536 | 493.19 | **508.55** | 2 935.05 | 2 818.68 | 3 423.35 | 3 808.47 | 3 789.01 | 27 458.83 |
+| len | glibc | Rust crate | **ML SIMD** | C SWAR | Rust imp. | Rust safe | ML style | ML imp. | `index_opt` |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 4 | 4.37 | 6.89 | **6.36** | 6.47 | 6.82 | 6.05 | 6.03 | 5.73 | 5.38 |
+| 8 | 4.42 | 8.57 | **8.23** | 7.73 | 7.60 | 6.34 | 7.58 | 6.22 | 8.14 |
+| 16 | 4.57 | 6.42 | **4.67** | 8.19 | 8.02 | 6.86 | 8.27 | 7.02 | 13.00 |
+| 32 | 4.71 | 7.01 | **4.87** | 8.25 | 8.14 | 6.89 | 8.68 | 8.28 | 27.70 |
+| 64 | 5.22 | 8.45 | **7.74** | 8.88 | 8.87 | 8.17 | 9.45 | 10.94 | 44.86 |
+| 128 | 6.11 | 9.57 | **8.50** | 13.05 | 12.14 | 11.34 | 14.27 | 14.64 | 77.12 |
+| 256 | 7.21 | 9.50 | **7.43** | 19.57 | 18.10 | 18.01 | 23.06 | 22.06 | 143.17 |
+| 1024 | 12.01 | 14.64 | **13.41** | 59.15 | 57.22 | 62.26 | 73.15 | 72.53 | 530.48 |
+| 4096 | 27.16 | 35.06 | **41.90** | 201.21 | 188.02 | 218.05 | 249.72 | 246.52 | 2 107.76 |
+| 65536 | 492.25 | 550.90 | **533.62** | 3 043.24 | 2 764.82 | 3 312.09 | 3 741.51 | 3 733.68 | 31 394.95 |
 
-There is no frequency pinning here, so treat absolute numbers as machine-specific
-and the ratios as the durable part.
+There is no frequency pinning, only core pinning, so absolute numbers remain
+machine-specific and the ratios are the portable part.
 
 ### Steady-state throughput
 
 Taking the slope between `len = 4096` and `len = 65536` removes fixed
 call/setup/tail overhead and leaves the cost of the inner loop alone:
 
-| Implementation | cycles/byte | bytes/cycle |
-| --- | ---: | ---: |
-| glibc `__memchr_evex` | 0.0194 | ~51.5 |
-| **`simd_memchr`** (OxCaml AVX2) | **0.0194** | **~51.5** |
-| Rust imperative SWAR | 0.1093 | ~9.2 |
-| C SWAR | 0.1140 | ~8.8 |
-| Rust safe SWAR | 0.1333 | ~7.5 |
-| `memchr` (ML imperative SWAR) | 0.1474 | ~6.8 |
-| `ml_memchr` (ML style SWAR) | 0.1480 | ~6.8 |
-| `Bytes.index_opt` | 1.0740 | ~0.9 |
+| Implementation | cycles/byte | bytes/cycle | vs. glibc |
+| --- | ---: | ---: | ---: |
+| glibc `__memchr_evex` | 0.0194 | ~51.6 | 1.00x |
+| **`simd_memchr`** (OxCaml AVX2) | **0.0205** | **~48.8** | **1.06x** |
+| Rust `memchr` crate 2.8.3 | 0.0215 | ~46.5 | 1.11x |
+| Rust imperative SWAR | 0.1074 | ~9.3 | 5.54x |
+| C SWAR | 0.1184 | ~8.4 | 6.11x |
+| Rust safe SWAR | 0.1289 | ~7.8 | 6.65x |
+| `memchr` (ML imperative SWAR) | 0.1453 | ~6.9 | 7.50x |
+| `ml_memchr` (ML style SWAR) | 0.1455 | ~6.9 | 7.51x |
+| `Bytes.index_opt` | 1.2203 | ~0.8 | 62.97x |
 
-The three languages' SWAR loops land in the same band, well above the ~1
-byte/cycle of a naive scan and well below vectorized `memchr`. `Bytes.index_opt`
-at almost exactly 1.0 cycles/byte is a clean sanity check that the baseline
-really is byte-at-a-time.
+There are three clear bands, and it is worth reading them as bands rather than as
+one ranking. The three SIMD implementations sit within 11% of each other. The five
+SWAR implementations sit within 35% of each other, roughly 6x below. And the
+byte-at-a-time stdlib baseline is another 8x below that, at 1.22 cycles per byte,
+which is the right order for a scalar loop with a bounds check and a branch per
+byte, and a clean sanity check that the baseline really is doing what it looks
+like.
+
+The gap that matters for the language question is *within* the SWAR band. The gap
+that matters for the "can OxCaml do SIMD" question is within the SIMD band. Rows
+compared across bands are measuring the algorithm, not the language.
 
 Note where safe Rust sits: between the pointer-chasing implementations and the
-OCaml ones. It is the closest neighbour either OCaml version has, and the gap to
-it is less than half the gap to C.
-
-And note that the top two rows are a tie, not a gap.
+OCaml ones. It is the closest neighbour either OCaml version has.
 
 ### Reading the results
 
-**OxCaml can hit vendor-`memchr` throughput.** This is the result that surprised
-me most. `simd_memchr` and glibc both sustain 0.0194 cycles/byte, ~51.5
-bytes/cycle, and the ordering flips between them from run to run. There is no
-asterisk on the OCaml side: it is `[@@zero_alloc]`-checked, it is called through
-the same harness as everything else, and glibc is running a *newer* instruction
-set (EVEX) than the AVX2 the OCaml uses. Whatever tax OCaml is paying in the SWAR
-rows, it is not being paid in this loop.
+**OxCaml gets within ~6% of vendor `memchr` throughput, and ahead of one of the
+two references.** `simd_memchr` sustains 0.0205 cycles/byte against glibc's
+0.0194 and the Rust crate's 0.0215. There is no asterisk on the OCaml side: it is
+`[@@zero_alloc]`-checked, it goes through the same harness as everything else, and
+glibc is reaching for a *newer* instruction set (EVEX) than the AVX2 the OCaml
+uses. Whatever tax OCaml is paying in the SWAR rows, very little of it is being
+paid in this loop.
 
-**But throughput is not the whole function.** `simd_memchr` is 1.03x behind glibc
-at 64 KiB, 1.12x at 1024, and 1.55x at 4096. Extrapolating the two-point fit back
-to zero length puts ~26 cycles of fixed overhead on `simd_memchr` and slightly
-below zero on glibc, which mostly says the two-point fit is crude, but the sign
-and rough size of the difference are consistent. At `len = 8` it is 19.0c, slower than
-everything in the table except `ml_memchr` and `Bytes.index_opt`, because it
-gives up and walks bytes. Matching the inner loop was the easy half. glibc's
-short-input handling and its page-cross prologue are the half that is still
-missing.
+**The crate result is the weaker half of that.** Beating `memchr` 2.8.3 by ~5% is
+not "OxCaml beats Rust"; the crate carries runtime dispatch, a portable fallback,
+and correctness on inputs `simd_memchr` never has to think about, while
+`simd_memchr` is tuned against precisely the haystack shape being measured. Two
+production implementations disagreeing with each other by 11% is the more useful
+takeaway: it sets the scale on which the OCaml's ~6% should be read.
 
-**The unboxing works.** ~6.8 bytes/cycle is not achievable if `int64#` values are
+**Throughput is not the whole function.** `simd_memchr` is 1.08x behind glibc at
+64 KiB, 1.12x at 1024, and 1.54x at 4096. Extrapolating the two-point fit back to
+zero length puts ~26 cycles of fixed overhead on it and roughly none on glibc,
+which mostly says a two-point fit is crude, though the sign and rough size are
+consistent across sizes. At `len = 8` it is 19.0c, beaten by every row in the
+table except the Rust crate, and beaten by `Bytes.index_opt`, because it gives up
+and walks bytes. Both production implementations spend real effort on short inputs
+and on page-cross safety. That is the half that is still missing here.
+
+**The unboxing works.** ~6.9 bytes/cycle is not achievable if `int64#` values are
 being boxed: a single heap allocation per iteration would show up immediately as a
 collapse toward the stdlib line. The `[@@zero_alloc]` check holds this in place at
 build time.
 
-**Idiomatic now costs nothing in steady state.** `ml_memchr` and `memchr` are
-0.1480 and 0.1474 cycles/byte, a 0.4% gap well inside run-to-run noise. Before
-the closure fix the idiomatic version was ~10% behind. The recursive, immutable,
-tail-call version of this algorithm is not slower than the mutable-loop version;
-it was only slower because it was quietly allocating.
+**Idiomatic costs nothing in steady state.** `ml_memchr` and `memchr` are 0.1455
+and 0.1453 cycles/byte, a 0.13% gap, which is as close to identical as this
+harness can resolve. Before the closure fix the idiomatic version was ~10% behind.
+The recursive, immutable, tail-call version of this algorithm is not slower than
+the mutable-loop version; it was only slower because it was quietly allocating.
 
-**Small-input wins are algorithmic, not linguistic.** At `len = 8` and `len = 16`
-the imperative OCaml is the fastest SWAR implementation in the table (15.3c and
-16.6c, against 16.7c and 17.4c for C). At `len = 4` the SWAR rows are all within
-noise of each other and no ordering should be read into them. Where the win is
-real it is the `ctz` tail beating a byte-at-a-time tail, not OxCaml outrunning C:
-at these sizes the tail is the entire function, and giving the C reference the
-same tail would take it back. The honest language comparison is the steady-state
-number.
+**Small-input wins are algorithmic, not linguistic.** At `len = 4` and `len = 8`
+the imperative OCaml is the fastest SWAR row in the table (13.2c and 14.3c,
+against 14.9c and 17.8c for C). At 16 and 32 safe Rust takes it back. Where the
+win is real it is the `ctz` tail beating a byte-at-a-time tail, not OxCaml
+outrunning C: at these sizes the tail is the entire function, and giving the C
+reference the same tail would take it back. The honest language comparison is the
+steady-state number.
 
 **The idiomatic tax is not an OCaml-specific phenomenon.** Writing the algorithm
-at a higher level of abstraction cost Rust ~22% of inner-loop throughput
-(0.1093 to 0.1333 cycles/byte) while costing OCaml nothing measurable. That is the
+at a higher level of abstraction cost Rust ~20% of inner-loop throughput
+(0.1074 to 0.1289 cycles/byte) while costing OCaml nothing measurable. That is the
 opposite of the result I expected, and it is worth stating plainly: after the
 `[@nontail]` fix, the idiomatic-versus-imperative gap in this codebase is larger
 in Rust than in OCaml. One benchmark on one algorithm is not a general claim about
@@ -613,21 +708,22 @@ either language, but it does undercut the assumption that the recursive OCaml
 formulation is the expensive one here.
 
 **Where the two OCaml SWAR versions still differ is the tail, not the loop.**
-`ml_memchr` is 21.8c at `len = 8` against `memchr`'s 15.3c, because it walks the
+`ml_memchr` is 17.5c at `len = 8` against `memchr`'s 14.3c, because it walks the
 final partial word one byte at a time while `memchr` resolves it with one `tzcnt`.
 That difference is deliberate: `ml_memchr` is there to show what the idiomatic
 formulation costs, and a `ctz` tail is not the idiomatic formulation.
 
-**The steady-state SWAR gap to C is ~1.29x.** The kernel is the same handful of
+**The steady-state SWAR gap to C is ~1.23x.** The kernel is the same handful of
 ALU ops everywhere, so what is left is loop shape and register pressure. Against
 safe Rust, which reaches its tier exits through `find_map` rather than a `break`,
-the gap narrows to ~1.11x. I have not read the emitted code for any of these, so
+the gap narrows to ~1.13x. I have not read the emitted code for any of these, so
 I am not going to attribute the remaining difference to a specific cause.
 
-**glibc beats the SWAR implementations by 6x to 8x, as it should.** At 64 KiB it
-is 7.7x faster than the imperative OCaml SWAR and 6.0x faster than the C SWAR it
+**The SIMD band beats the SWAR band by 5x to 8x, as it should.** At 64 KiB glibc
+is 7.6x faster than the imperative OCaml SWAR and 6.2x faster than the C SWAR it
 is measured against. That gap is 256-bit vectors versus 64-bit registers, and it
-is exactly the gap `simd_memchr` closes by using the same weapon.
+is very nearly the gap `simd_memchr` closes by using the same weapon: 7.0x over
+its own SWAR sibling, in the same language, with the same allocation guarantee.
 
 **Allocation column.** `core_bench` reports a uniform `3.00w` per run for *every*
 row, including the `[@@noalloc]` C stubs. This is harness overhead in the staged
@@ -645,8 +741,15 @@ needs a CPU with AVX2.
 dune build                      # builds the library and benchmark executable
 dune build --profile release    # builds an optimized executable for benchmarks
 dune test                       # inline tests
-./_build/default/benchmarks/memchr_bench.exe time cycles percentage -quota 3 -ascii
+
+taskset -c 9 ./_build/default/benchmarks/memchr_bench.exe \
+  +time +cycles percentage -quota 3 -ascii -ci-absolute
 ```
+
+Pin the benchmark to a core. Without `taskset` the numbers move by double-digit
+percentages between runs at small lengths, and no amount of averaging recovers
+that cleanly. The `+` prefixes turn on 95% confidence intervals so a single run
+reports its own uncertainty.
 
 `dune build` covers everything: the root `dune` defines a `default` alias
 depending on `benchmarks/memchr_bench.exe` and `(alias_rec src/all)`, and the
@@ -656,8 +759,11 @@ If you're doing profiling, ensure that you run `dune build --profile release`
 for accurate numbers, otherwise dune may simply produce the debug build.
 
 The Rust static library is built by a dune rule shelling out to `cargo build
---release --offline`, so `benchmarks/rust` must build without network access
-(it has no dependencies beyond std).
+--release --offline`, so `benchmarks/rust` must build without network access. Its
+one dependency, the `memchr` crate, is vendored into `benchmarks/rust/vendor` with
+a source replacement in `benchmarks/rust/.cargo/config.toml`, which is what keeps
+`--offline` working. Refresh it with `cargo vendor` from `benchmarks/rust` if the
+dependency ever changes.
 
 ### Tests
 
@@ -687,6 +793,11 @@ allocates a fresh buffer behind a randomly sized spacer. Instrumenting that
 allocation pattern confirms all four reachable misalignments (0, 8, 16, 24) occur
 in roughly equal proportion, so neither prologue branch is going untested.
 
+The three Rust entry points got the same treatment on their own side: **536,703
+cases** against a naive scan, zero mismatches, covering every needle position for
+every length from 0 to 400, dense random haystacks up to 3000 bytes, no-needle
+cases, and high-bit needles.
+
 ## Layout
 
 ```
@@ -695,29 +806,38 @@ src/memchr.mli               all three values, all three [@@zero_alloc]
 benchmarks/memchr_bench.ml   core_bench driver
 benchmarks/memchr_stubs.c    glibc memchr binding
 benchmarks/swar_stubs.c      C SWAR reference (-fno-tree-vectorize)
-benchmarks/rs_stubs.c        FFI shim for both Rust entry points
-benchmarks/rust/src/lib.rs   Rust SWAR references, imperative + safe
+benchmarks/rs_stubs.c        FFI shim for all three Rust entry points
+benchmarks/rust/src/lib.rs   Rust SWAR references + memchr crate shim
+benchmarks/rust/vendor/      vendored memchr crate, for offline builds
 ```
 
 ## Caveats
 
-- Single machine, single microarchitecture, no frequency pinning. Ratios are
-  stable across runs; absolute numbers are not a portable claim.
+- Single machine, single microarchitecture. The benchmark is pinned to one core
+  but the frequency is not pinned, so absolute numbers are not a portable claim.
+- **Single run.** Uncertainty is reported as within-run 95% confidence intervals,
+  which do not capture between-process variation in heap layout, haystack
+  alignment or frequency state. Differences of a percent or two between rows are
+  below what this setup can resolve, even when the intervals suggest otherwise.
 - One haystack shape (needle at ~90%, uniform filler). Hit-early, no-hit, and
   unaligned-start distributions are not measured. The last of these matters more
   for `simd_memchr` than for the others, since its prologue exists precisely to
   handle unaligned starts.
 - `simd_memchr` requires AVX2 and does not check for it at runtime. There is no
   scalar fallback and no `cpuid` dispatch, which is the main thing separating it
-  from a `memchr` you could ship.
+  from a `memchr` you could ship, and the main reason its ~5% edge over the
+  `memchr` crate should not be read as a like-for-like win.
 - The `ctz` tail in `memchr` and the vector narrowing in `simd_memchr` are both
   little-endian-only, and everything here has been built and tested only on
   x86-64.
 - The glibc comparison is against whatever ifunc this machine selects, which is
   `__memchr_evex`. A machine without AVX-512 would select a different and probably
   slower variant, which would flatter `simd_memchr`.
-- Both Rust functions are hand-written SWAR, deliberately hobbled to match the
-  algorithm. Neither is the `memchr` crate, which would be in glibc's league.
+- The two Rust SWAR functions are hand-written and compiled with
+  auto-vectorization off so they run the SWAR algorithm rather than a
+  compiler-generated vector one. The `memchr` crate is unaffected by those flags,
+  which is measured rather than assumed. See
+  [Do the no-vectorize flags affect the crate?](#do-the-no-vectorize-flags-affect-the-crate).
 - "Safe" in `rs_safe_memchr` means one `unsafe` block instead of one per load. The
   `from_raw_parts` call is still a real obligation: it trusts the caller's `len`,
   exactly as the OCaml `memchr` trusts its `n`.

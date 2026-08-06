@@ -127,3 +127,9 @@ pub extern "C" fn rs_safe_memchr(p: *const u8, needle: u8, len: usize) -> isize 
         .find_map(|(idx, byte)| (*byte == needle).then_some(idx as isize + offset))
         .unwrap_or(-1)
 }
+
+#[unsafe(no_mangle)]
+pub extern "C" fn rs_simd_memchr(p: *const u8, needle: u8, len: usize) -> isize {
+    let slice = unsafe { std::slice::from_raw_parts(p, len) };
+    memchr::memchr(needle, slice).map(|found| found as isize).unwrap_or(-1)
+}

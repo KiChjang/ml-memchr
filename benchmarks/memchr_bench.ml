@@ -11,6 +11,9 @@ external rs_memchr : bytes -> char -> int -> int = "ml_rs_memchr" [@@noalloc]
 external rs_safe_memchr : bytes -> char -> int -> int = "ml_rs_safe_memchr"
 [@@noalloc]
 
+external rs_simd_memchr : bytes -> char -> int -> int = "ml_rs_simd_memchr"
+[@@noalloc]
+
 let haystack len =
   let bytes = Bytes.make len 'a' in
   let i = len - (len / 10) - 1 in
@@ -23,6 +26,11 @@ let tests =
       ~args:[ 4; 8; 16; 32; 64; 128; 256; 1024; 4096; 65536 ] (fun len ->
         let s = haystack len in
         Core.Staged.stage (fun () -> Sys.opaque_identity (c_memchr s 'z' len)));
+    Bench.Test.create_indexed ~name:"Rust SIMD memchr"
+      ~args:[ 4; 8; 16; 32; 64; 128; 256; 1024; 4096; 65536 ] (fun len ->
+        let s = haystack len in
+        Core.Staged.stage (fun () ->
+            Sys.opaque_identity (rs_simd_memchr s 'z' len)));
     Bench.Test.create_indexed ~name:"ML SIMD memchr"
       ~args:[ 4; 8; 16; 32; 64; 128; 256; 1024; 4096; 65536 ] (fun len ->
         let s = haystack len in
